@@ -1,0 +1,9 @@
+export { default as InventoryMainDashboard } from './InventoryMainDashboard';
+export { default as InventorySidebar } from './InventorySidebar';
+export { default as InventoryDashboard } from './InventoryDashboard';
+export { default as InventoryBatteryManagement } from './InventoryBatteryManagement';
+export { default as InventoryChargerManagement } from './InventoryChargerManagement';
+export { default as InventoryGatePassManagement } from './InventoryGatePassMaagement';
+export { default as InventoryIssueTriage } from './InventoryIssueTriage';
+export { default as InventoryInventoryReports } from './InventoryInventoryReports';
+export { default as InventoryNotifications } from './InventoryNotifications';
