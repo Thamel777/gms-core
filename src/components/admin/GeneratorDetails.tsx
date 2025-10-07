@@ -5,6 +5,76 @@ import { useParams } from "next/navigation";
 import { onValue, ref, get, query, orderByChild, equalTo } from "firebase/database";
 import { db } from "../../firebaseConfig";
 
+type RawGeneratorRecord = {
+  id?: string;
+  brand?: string;
+  size?: string;
+  serial_no?: string;
+  serialNumber?: string;
+  issued_date?: number | string | null;
+  installed_date?: number | string | null;
+  status?: string;
+  shop_id?: string;
+  location?: string;
+  hasAutoStart?: number | boolean;
+  hasBatteryCharger?: number | boolean;
+  warranty?: number | string | null;
+  extracted_parts?: unknown[];
+  createdAt?: number;
+  updatedAt?: number;
+};
+
+type RawServiceLog = {
+  id?: string;
+  generatorId?: string;
+  generator_id?: string;
+  generator?: string;
+  serviceType?: string;
+  type?: string;
+  serviceDate?: string | number | null;
+  date?: string | number | null;
+  nextDueDate?: string | number | null;
+  nextServiceDate?: string | number | null;
+  technician?: string;
+  notes?: string;
+  description?: string;
+  serviceCost?: string | number | null;
+  cost?: string | number | null;
+  invoiceNo?: string;
+  invoice?: string;
+  serviceId?: string;
+  status?: string;
+  statusOverride?: string;
+  createdAt?: number;
+  updatedAt?: number;
+};
+
+type RepairLogRecord = RawServiceLog & {
+  title?: string;
+};
+
+const extractDateValue = (record: RawServiceLog): number => {
+  const dynamicRecord = record as Record<string, unknown>;
+  const keys = ["date", "serviceDate", "service_date", "nextServiceDate", "nextDueDate", "createdAt", "updatedAt", "timestamp"];
+  for (const key of keys) {
+    const candidate = dynamicRecord[key];
+    if (candidate == null || candidate === "") continue;
+    if (candidate instanceof Date) return candidate.getTime();
+    if (typeof candidate === "number") return candidate;
+    if (typeof candidate === "string") {
+      const numeric = Number(candidate);
+      if (!Number.isNaN(numeric) && numeric > 0) return numeric;
+      const parsed = Date.parse(candidate);
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+  }
+  return 0;
+};
+
+const sortRecordsByDate = <T extends RawServiceLog>(records: T[]): T[] => {
+  return [...records].sort((a, b) => extractDateValue(a) - extractDateValue(b));
+};
+
 interface IndividualProps {
   onNavigate: (page: string) => void;
   generatorId?: string;
@@ -38,31 +108,11 @@ export default function Dashboard({ onNavigate, generatorId }: IndividualProps) 
     console.log("Form submitted:", formData);
     setShowModal(false);
   };
-
-  // Loaded generator
-  type RawGeneratorRecord = {
-    id?: string;
-    brand?: string;
-    size?: string;
-    serial_no?: string;
-    serialNumber?: string;
-    issued_date?: number | string | null;
-    installed_date?: number | string | null;
-    status?: string;
-    shop_id?: string;
-    location?: string;
-    hasAutoStart?: number | boolean;
-    hasBatteryCharger?: number | boolean;
-    warranty?: number | string | null;
-    extracted_parts?: unknown[];
-    createdAt?: number;
-    updatedAt?: number;
-  };
-
   const [gen, setGen] = useState<RawGeneratorRecord | null>(null);
   const [shopName, setShopName] = useState<string>("");
-  const [serviceHistory, setServiceHistory] = useState<Record<string, unknown>[]>([]);
-  const [repairLogs, setRepairLogs] = useState<Record<string, unknown>[]>([]);
+  const [serviceHistory, setServiceHistory] = useState<RawServiceLog[]>([]);
+  const [repairsFromServices, setRepairsFromServices] = useState<RepairLogRecord[]>([]);
+  const [repairsFromDirect, setRepairsFromDirect] = useState<RepairLogRecord[]>([]);
 
   const toTitle = (s?: string | null) => {
     const v = String(s ?? "").trim();
@@ -138,14 +188,165 @@ export default function Dashboard({ onNavigate, generatorId }: IndividualProps) 
     return () => unsub();
   }, [gen?.shop_id]);
 
-  // Attempt to load logs if available under common patterns
   useEffect(() => {
-    if (!effectiveId) { setServiceHistory([]); setRepairLogs([]); return; }
-    const norm = (obj: unknown) => obj && typeof obj === 'object' ? Object.values(obj as Record<string, unknown>) : Array.isArray(obj) ? obj : [];
-    const u1 = onValue(ref(db(), `generator_services/${effectiveId}`), (s) => setServiceHistory(norm(s.val())));
-    const u2 = onValue(ref(db(), `generator_repairs/${effectiveId}`), (s) => setRepairLogs(norm(s.val())));
-    return () => { u1(); u2(); };
+    if (!effectiveId) {
+      setServiceHistory([]);
+      setRepairsFromServices([]);
+      return;
+    }
+
+    const database = db();
+    const servicesRef = ref(database, "services");
+    const unsubscribe = onValue(servicesRef, (snapshot) => {
+      const value = snapshot.val() as Record<string, RawServiceLog> | null;
+      if (!value) {
+        setServiceHistory([]);
+        setRepairsFromServices([]);
+        return;
+      }
+
+      const generatorCandidates = new Set<string>();
+      const addCandidate = (candidate: unknown) => {
+        if (!candidate && candidate !== 0) return;
+        const normalized = String(candidate).trim().toLowerCase();
+        if (normalized) {
+          generatorCandidates.add(normalized);
+        }
+      };
+
+      addCandidate(effectiveId);
+      addCandidate(gen?.id);
+      const potentialGeneratorId = (gen as Record<string, unknown> | null)?.["generatorId"];
+      addCandidate(potentialGeneratorId);
+
+      const mapped = Object.entries(value)
+        .map(([id, record]) => ({ ...(record ?? {}), id } as RawServiceLog))
+        .filter((record) => record && typeof record === "object");
+
+      if (generatorCandidates.size === 0) {
+        setServiceHistory([]);
+        setRepairsFromServices([]);
+        return;
+      }
+
+      const maintenance: RawServiceLog[] = [];
+      const repairs: RepairLogRecord[] = [];
+
+      mapped.forEach((record) => {
+        const recordGenerator = record.generatorId ?? record.generator_id ?? record.generator;
+        const trimmedRecordGenerator = recordGenerator ? String(recordGenerator).trim().toLowerCase() : "";
+        if (!trimmedRecordGenerator || !generatorCandidates.has(trimmedRecordGenerator)) {
+          return;
+        }
+
+        const serviceType = String(record.serviceType ?? record.type ?? "").trim();
+        const lowerType = serviceType.toLowerCase();
+        const base: RawServiceLog = {
+          ...record,
+          serviceType,
+          type: serviceType,
+          serviceDate: record.serviceDate ?? record.date ?? null,
+          date: record.serviceDate ?? record.date ?? null,
+          nextServiceDate: record.nextServiceDate ?? record.nextDueDate ?? null,
+          nextDueDate: record.nextDueDate ?? record.nextServiceDate ?? null,
+          serviceCost: record.serviceCost ?? record.cost ?? null,
+          cost: record.serviceCost ?? record.cost ?? null,
+          description: record.description ?? record.notes ?? "",
+          notes: record.notes ?? record.description ?? "",
+          invoiceNo: record.invoiceNo ?? record.invoice ?? record.serviceId ?? record.id,
+        };
+
+        if (lowerType.includes("repair")) {
+          repairs.push({
+            ...base,
+            title: base.serviceType || "Repair",
+            status: record.status ?? record.statusOverride ?? "Completed",
+          });
+        } else {
+          maintenance.push(base);
+        }
+      });
+
+      setServiceHistory(sortRecordsByDate(maintenance));
+      setRepairsFromServices(sortRecordsByDate(repairs));
+    });
+
+    return () => unsubscribe();
+  }, [effectiveId, gen]);
+
+  useEffect(() => {
+    if (!effectiveId) {
+      setRepairsFromDirect([]);
+      return;
+    }
+
+    const database = db();
+    const repRef = ref(database, `generator_repairs/${effectiveId}`);
+    const unsubscribe = onValue(repRef, (snapshot) => {
+      const value = snapshot.val();
+      if (!value) {
+        setRepairsFromDirect([]);
+        return;
+      }
+
+      let records: RepairLogRecord[] = [];
+      if (Array.isArray(value)) {
+        records = value
+          .filter((item): item is RepairLogRecord => !!item && typeof item === "object")
+          .map((item, index) => ({ ...item, id: item.id ?? String(index) }));
+      } else if (typeof value === "object") {
+        records = Object.entries(value as Record<string, unknown>).map(([id, item]) => {
+          if (item && typeof item === "object") {
+            return { ...(item as RepairLogRecord), id: (item as RepairLogRecord).id ?? id };
+          }
+          return { id };
+        });
+      }
+
+      const normalised = records.map((record) => ({
+        ...record,
+        title: record.title ?? record.serviceType ?? record.type ?? "Repair",
+        date: record.date ?? record.serviceDate ?? null,
+        serviceDate: record.date ?? record.serviceDate ?? null,
+      }));
+
+      setRepairsFromDirect(sortRecordsByDate(normalised));
+    });
+
+    return () => unsubscribe();
   }, [effectiveId]);
+
+  const repairLogs = (() => {
+    const combined = [...repairsFromServices, ...repairsFromDirect];
+    if (!combined.length) return [] as RepairLogRecord[];
+
+    const seen = new Set<string>();
+    const deduped: RepairLogRecord[] = [];
+
+    combined.forEach((item) => {
+      let key: string;
+      try {
+        key = JSON.stringify({
+          id: item.id ?? null,
+          date: item.date ?? item.serviceDate ?? null,
+          type: item.serviceType ?? item.type ?? null,
+          technician: item.technician ?? null,
+          description: item.description ?? item.notes ?? null,
+          cost: item.cost ?? item.serviceCost ?? null,
+          status: item.status ?? item.statusOverride ?? null,
+        });
+      } catch {
+        key = `${item.id ?? ""}-${item.date ?? ""}-${item.serviceType ?? item.type ?? ""}`;
+      }
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduped.push(item);
+      }
+    });
+
+    return sortRecordsByDate(deduped);
+  })();
 
 
   return (
@@ -372,7 +573,7 @@ export default function Dashboard({ onNavigate, generatorId }: IndividualProps) 
                     {serviceHistory.length === 0 ? (
                       <tr><td colSpan={6} className="p-3 text-gray-500">No service records</td></tr>
                     ) : (
-                      serviceHistory.map((s: Record<string, unknown>, idx: number) => (
+                      serviceHistory.map((s, idx) => (
                         <tr key={idx} className="border-b border-gray-100">
                           <td className="p-3">{fmtDate(s?.date as number | string | null)}</td>
                           <td className="p-3">{(s?.type as string) || (s?.serviceType as string) || "-"}</td>
@@ -394,7 +595,7 @@ export default function Dashboard({ onNavigate, generatorId }: IndividualProps) 
               <div id="2">
                 {repairLogs.length > 0 && (
                   <div className="space-y-2">
-                    {repairLogs.map((r: Record<string, unknown>, idx: number) => (
+                    {repairLogs.map((r, idx) => (
                       <div key={idx} className="border border-blue-300 rounded-md p-4 shadow-sm bg-white">
                         <div className="flex items-center mb-2">
                           <div className="flex items-center gap-2 mr-4">
@@ -417,83 +618,9 @@ export default function Dashboard({ onNavigate, generatorId }: IndividualProps) 
                   </div>
                 )}
                 {repairLogs.length === 0 && (
-                  <>
-                    <div className="border border-blue-300 rounded-md p-4 shadow-sm bg-white mb-2">
-                      {/* Header */}
-                      <div className="flex items-center mb-2">
-                        <div className="flex items-center gap-2 mr-4">
-                          <span className="text-red-500 text-lg">⚠️</span>
-                          <h2 className="font-semibold text-black-900">Fuel pressure drop</h2>
-                        </div>
-                        <span className="bg-blue-100 text-blue-600 text-xs font-medium px-2 py-1 rounded">
-                          Resolved
-                        </span>
-                      </div>
-
-                      {/* Description */}
-                      <div className="text-sm  space-y-1 mb-3">
-                        <p className="text-sm text-gray-600">Investigated fuel system, found clogged filter</p>
-                        <p className="text-sm text-black-900">Replaced fuel filter, tested system</p>
-                      </div>
-
-                      {/* Technician Info */}
-                      <div className="text-sm text-gray-500 flex gap-4 mb-2 ">
-                        <p>
-                          <span className="font-medium">Technician:</span> Dinal Rashmika
-                        </p>
-                        <p>
-                          <span className="font-medium">Cost:</span> LKR 900
-                        </p>
-                        <p>
-                          <span className="font-medium">Date:</span> 7/20/2025
-                        </p>
-                      </div>
-
-                      {/* Parts Used */}
-                      <p className="text-sm text-gray-500">
-                        <span className="font-medium text-black-900">Parts Used:</span> Fuel Filter - FFS320,
-                        O-Ring Kit
-                      </p>
-                    </div>
-
-                    <div className="border border-blue-300 rounded-md p-4 shadow-sm bg-white">
-                      {/* Header */}
-                      <div className="flex items-center mb-2">
-                        <div className="flex items-center gap-2 mr-4">
-                          <span className="text-red-500 text-lg">⚠️</span>
-                          <h2 className="font-semibold text-black-900">Fuel pressure drop</h2>
-                        </div>
-                        <span className="bg-blue-100 text-blue-600 text-xs font-medium px-2 py-1 rounded">
-                          Resolved
-                        </span>
-                      </div>
-
-                      {/* Description */}
-                      <div className="text-sm  space-y-1 mb-3">
-                        <p className="text-sm text-gray-600">Investigated fuel system, found clogged filter</p>
-                        <p className="text-sm text-black-900">Replaced fuel filter, tested system</p>
-                      </div>
-
-                      {/* Technician Info */}
-                      <div className="text-sm text-gray-500 flex gap-4 mb-2 ">
-                        <p>
-                          <span className="font-medium">Technician:</span> Dinal Rashmika
-                        </p>
-                        <p>
-                          <span className="font-medium">Cost:</span> LKR 900
-                        </p>
-                        <p>
-                          <span className="font-medium">Date:</span> 7/20/2025
-                        </p>
-                      </div>
-
-                      {/* Parts Used */}
-                      <p className="text-sm text-gray-500">
-                        <span className="font-medium text-black-900">Parts Used:</span> Fuel Filter - FFS320,
-                        O-Ring Kit
-                      </p>
-                    </div>
-                  </>
+                  <div className="border border-blue-100 rounded-md p-4 bg-white text-gray-500">
+                    No repair logs recorded.
+                  </div>
                 )}
 
               </div>
@@ -669,3 +796,4 @@ export default function Dashboard({ onNavigate, generatorId }: IndividualProps) 
     </div>
   );
 }
+
