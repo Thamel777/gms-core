@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { signOut } from 'firebase/auth';
 import { auth } from '@/firebaseConfig';
@@ -28,7 +28,7 @@ const getPageFromParam = (value: string | null): string | null => {
   return PARAM_TO_PAGE[value.toLowerCase()] ?? null;
 };
 
-export default function TechnicianPanel() {
+function TechnicianPanelContent() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -134,5 +134,19 @@ export default function TechnicianPanel() {
         {renderContent()}
       </main>
     </div>
+  );
+}
+
+export default function TechnicianPanel() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-screen items-center justify-center bg-gray-50 text-gray-600">
+          Loading technician panel...
+        </div>
+      }
+    >
+      <TechnicianPanelContent />
+    </Suspense>
   );
 }
