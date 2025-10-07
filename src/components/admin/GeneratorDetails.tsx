@@ -38,6 +38,7 @@ type RawServiceLog = {
   technician?: string;
   notes?: string;
   description?: string;
+  issue?: string;
   serviceCost?: string | number | null;
   cost?: string | number | null;
   invoiceNo?: string;
